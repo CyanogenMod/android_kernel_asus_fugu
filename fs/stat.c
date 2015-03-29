@@ -14,6 +14,7 @@
 #include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/pagemap.h>
+#include <linux/zfile.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -60,9 +61,11 @@ int vfs_fstat(unsigned int fd, struct kstat *stat)
 	struct fd f = fdget_raw(fd);
 	int error = -EBADF;
 
-	if (f.file) {
-		error = vfs_getattr(&f.file->f_path, stat);
-		fdput(f);
+	if (f) {
+		error = vfs_getattr(f->f_path.mnt, f->f_path.dentry, stat);
+		if (!error)
+			zpath_realsize(f->f_path.dentry, &stat->size);
+		fput(f);
 	}
 	return error;
 }
@@ -88,7 +91,9 @@ retry:
 	if (error)
 		goto out;
 
-	error = vfs_getattr(&path, stat);
+	error = vfs_getattr(path.mnt, path.dentry, stat);
+	if (!error)
+		zpath_realsize(path.dentry, &stat->size);
 	path_put(&path);
 	if (retry_estale(error, lookup_flags)) {
 		lookup_flags |= LOOKUP_REVAL;
