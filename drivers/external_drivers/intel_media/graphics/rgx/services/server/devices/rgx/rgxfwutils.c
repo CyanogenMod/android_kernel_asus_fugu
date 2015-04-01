@@ -64,6 +64,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "rgxdebug.h"
 #include "rgxhwperf.h"
 #include "rgxccb.h"
+#include "rgxcompute.h"
+#include "rgxtransfer.h"
+#if defined(RGX_FEATURE_RAY_TRACING)
+#include "rgxray.h"
+#endif
+#include "dc_server.h"
 #include "rgxmem.h"
 #include "rgxta3d.h"
 #include "rgxutils.h"
@@ -1419,7 +1425,12 @@ PVRSRV_ERROR RGXSetupFirmware(PVRSRV_DEVICE_NODE	*psDeviceNode,
 	 * May allocate host buffer if HWPerf enabled at driver load time.
 	 */
 	eError = RGXHWPerfInit(psDeviceNode, (ui32ConfigFlags & RGXFWIF_INICFG_HWPERF_EN));
-	PVR_LOGG_IF_ERROR(eError, "RGXHWPerfInit", failHWPerfInit);
+
+	if (eError != PVRSRV_OK)
+	{
+		PVR_LOGG_IF_ERROR(eError, "RGXHWPerfInit", failHWPerfInit);
+		goto failHWPerfInit;
+	}
 
 	/* Set initial log type */
 	if (ui32LogType & ~RGXFWIF_LOG_TYPE_MASK)
@@ -1477,6 +1488,42 @@ PVRSRV_ERROR RGXSetupFirmware(PVRSRV_DEVICE_NODE	*psDeviceNode,
 	psDevInfo->psRGXFWIfGpuUtilFWCb->aui64CB[0] = RGXFWIF_GPU_UTIL_FWCB_RESERVED;
 	psDevInfo->psRGXFWIfGpuUtilFWCb->aui64CB[RGXFWIF_GPU_UTIL_FWCB_SIZE-1] = RGXFWIF_GPU_UTIL_FWCB_RESERVED;
 
+	uiMemAllocFlags =	PVRSRV_MEMALLOCFLAG_DEVICE_FLAG(PMMETA_PROTECT) |
+						PVRSRV_MEMALLOCFLAG_GPU_READABLE |
+						PVRSRV_MEMALLOCFLAG_CPU_READABLE |
+						PVRSRV_MEMALLOCFLAG_CPU_WRITEABLE |
+						PVRSRV_MEMALLOCFLAG_KERNEL_CPU_MAPPABLE |
+						PVRSRV_MEMALLOCFLAG_UNCACHED |
+						PVRSRV_MEMALLOCFLAG_ZERO_ON_ALLOC;
+
+	PDUMPCOMMENT("Allocate rgxfw FW runtime configuration (FW)");
+	eError = DevmemFwAllocate(psDevInfo,
+							sizeof(RGXFWIF_RUNTIME_CFG),
+							uiMemAllocFlags,
+							"FirmwareFWRuntimeCfg",
+							&psDevInfo->psRGXFWIfRuntimeCfgMemDesc);
+
+	if (eError != PVRSRV_OK)
+	{
+		PVR_DPF((PVR_DBG_ERROR,"RGXSetupFirmware: Failed to allocate %u bytes for FW runtime configuration (%u)",
+				(IMG_UINT32)sizeof(RGXFWIF_RUNTIME_CFG),
+				eError));
+		goto failFWIfRuntimeCfgMemDescAlloc;
+	}
+
+	RGXSetFirmwareAddress(&psRGXFWInit->psRuntimeCfg,
+						psDevInfo->psRGXFWIfRuntimeCfgMemDesc,
+						0, RFW_FWADDR_NOREF_FLAG);
+
+	eError = DevmemAcquireCpuVirtAddr(psDevInfo->psRGXFWIfRuntimeCfgMemDesc,
+									(IMG_VOID **)&psDevInfo->psRGXFWIfRuntimeCfg);
+	if (eError != PVRSRV_OK)
+	{
+		PVR_DPF((PVR_DBG_ERROR,"RGXSetupFirmware: Failed to acquire kernel FW runtime configuration (%u)",
+				eError));
+		goto failFWIfRuntimeCfgMemDescAqCpuVirt;
+	}
+
 #if defined(SUPPORT_USER_REGISTER_CONFIGURATION)
 	PDUMPCOMMENT("Allocate rgxfw register configuration structure");
 	eError = DevmemFwAllocate(psDevInfo,
@@ -1490,7 +1537,7 @@ PVRSRV_ERROR RGXSetupFirmware(PVRSRV_DEVICE_NODE	*psDeviceNode,
 		PVR_DPF((PVR_DBG_ERROR,"RGXSetupFirmware: Failed to allocate %ld bytes for fw register configurations (%u)",
 				sizeof(RGXFWIF_REG_CFG),
 				eError));
-		goto failFWIfTraceBufCtlMemDescAlloc;
+		goto failFWIfRegconfigMemDescAlloc;
 	}
 
 	RGXSetFirmwareAddress(&psRGXFWInit->psRegCfg,
@@ -1507,7 +1554,7 @@ PVRSRV_ERROR RGXSetupFirmware(PVRSRV_DEVICE_NODE	*psDeviceNode,
 		goto failed_sync_ctx_alloc;
 	}
 
-	eError = SyncPrimAlloc(psDevInfo->hSyncPrimContext, &psDevInfo->psPowSyncPrim);
+	eError = SyncPrimAlloc(psDevInfo->hSyncPrimContext, &psDevInfo->psPowSyncPrim, "fw power ack");
 	if (eError != PVRSRV_OK)
 	{
 		PVR_DPF((PVR_DBG_ERROR,"RGXSetupFirmware: Failed to allocate sync primitive with error (%u)", eError));
@@ -1519,18 +1566,24 @@ PVRSRV_ERROR RGXSetupFirmware(PVRSRV_DEVICE_NODE	*psDeviceNode,
 	/* Required info by FW to calculate the ActivePM idle timer latency */
 	{
 		RGX_DATA *psRGXData = (RGX_DATA*) psDeviceNode->psDevConfig->hDevData;
+		RGXFWIF_RUNTIME_CFG *psRuntimeCfg = psDevInfo->psRGXFWIfRuntimeCfg;
 
 		/* if user defined clockspeed */
 		if (ui32CoreClockSpeed != psRGXData->psRGXTimingInfo->ui32CoreClockSpeed)
 			psRGXFWInit->ui32InitialCoreClockSpeed = ui32CoreClockSpeed;
 		else
-			psRGXFWInit->ui32InitialCoreClockSpeed = psRGXData->psRGXTimingInfo->ui32CoreClockSpeed;
+		psRGXFWInit->ui32InitialCoreClockSpeed = psRGXData->psRGXTimingInfo->ui32CoreClockSpeed;
 
 		/* if user defined latency */
 		if (psRGXData->psRGXTimingInfo->ui32ActivePMLatencyms != ui32APMLatency)
 			psRGXFWInit->ui32ActivePMLatencyms = ui32APMLatency;
 		else
-			psRGXFWInit->ui32ActivePMLatencyms = psRGXData->psRGXTimingInfo->ui32ActivePMLatencyms;
+		psRGXFWInit->ui32ActivePMLatencyms = psRGXData->psRGXTimingInfo->ui32ActivePMLatencyms;
+
+		/* Initialise variable runtime configuration to the system defaults */
+		psRuntimeCfg->ui32CoreClockSpeed = psRGXFWInit->ui32InitialCoreClockSpeed;
+		psRuntimeCfg->ui32ActivePMLatencyms = psRGXFWInit->ui32ActivePMLatencyms;
+		psRuntimeCfg->bActivePMLatencyPersistant = IMG_TRUE;
 	}
 
 	/* Setup Fault read register */
@@ -2148,8 +2201,19 @@ failed_sync_alloc:
 	SyncPrimContextDestroy(psDevInfo->hSyncPrimContext);
 
 failed_sync_ctx_alloc:
+#if defined(SUPPORT_USER_REGISTER_CONFIGURATION)
+	DevmemFwFree(psDevInfo->psRGXFWIfRegCfgMemDesc);
+
+failFWIfRegconfigMemDescAlloc:
+#endif
+	DevmemReleaseCpuVirtAddr(psDevInfo->psRGXFWIfRuntimeCfgMemDesc);
+
+failFWIfRuntimeCfgMemDescAqCpuVirt:
+	DevmemFwFree(psDevInfo->psRGXFWIfRuntimeCfgMemDesc);
+
+failFWIfRuntimeCfgMemDescAlloc:
 	DevmemReleaseCpuVirtAddr(psDevInfo->psRGXFWIfGpuUtilFWCbCtlMemDesc);
-	
+
 failFWIfGpuUtilFWCbCtlMemDescAqCpuVirt:
 	DevmemFwFree(psDevInfo->psRGXFWIfGpuUtilFWCbCtlMemDesc);
 
@@ -2310,6 +2374,12 @@ IMG_VOID RGXFreeFirmware(PVRSRV_RGXDEV_INFO 	*psDevInfo)
 	{
 		DevmemReleaseCpuVirtAddr(psDevInfo->psRGXFWIfGpuUtilFWCbCtlMemDesc);
 		DevmemFwFree(psDevInfo->psRGXFWIfGpuUtilFWCbCtlMemDesc);
+	}
+
+	if (psDevInfo->psRGXFWIfRuntimeCfgMemDesc)
+	{
+		DevmemReleaseCpuVirtAddr(psDevInfo->psRGXFWIfRuntimeCfgMemDesc);
+		DevmemFwFree(psDevInfo->psRGXFWIfRuntimeCfgMemDesc);
 	}
 
 	if (psDevInfo->psRGXFWIfHWRInfoBufCtlMemDesc)
@@ -2517,7 +2587,19 @@ PVRSRV_ERROR RGXSendCommandWithPowLock(PVRSRV_RGXDEV_INFO 	*psDevInfo,
 		goto _PVRSRVSetDevicePowerStateKM_Exit;
 	}
 
-	RGXSendCommandRaw(psDevInfo, eKCCBType,  psKCCBCmd, ui32CmdSize, bPDumpContinuous?PDUMP_FLAGS_CONTINUOUS:0);
+	eError = RGXSendCommandRaw(psDevInfo, eKCCBType,  psKCCBCmd, ui32CmdSize, bPDumpContinuous?PDUMP_FLAGS_CONTINUOUS:0);
+
+	if (eError != PVRSRV_OK)
+	{
+		PVR_DPF((PVR_DBG_ERROR, "RGXSendCommandWithPowLock: failed to schedule command (%s)",
+					PVRSRVGetErrorStringKM(eError)));
+#if defined(DEBUG)
+		/* PVRSRVDebugRequest must be called without powerlock */
+		PVRSRVPowerUnlock();
+		PVRSRVDebugRequest(DEBUG_REQUEST_VERBOSITY_MAX, IMG_NULL);
+		goto _PVRSRVPowerLock_Exit;
+#endif
+	}
 
 _PVRSRVSetDevicePowerStateKM_Exit:
 	PVRSRVPowerUnlock();
@@ -2587,9 +2669,6 @@ PVRSRV_ERROR RGXSendCommandRaw(PVRSRV_RGXDEV_INFO 	*psDevInfo,
 	{
 		PVR_DPF((PVR_DBG_ERROR, "RGXSendCommandRaw failed to acquire CCB slot. Type:%u Error:%u",
 				eKCCBType, eError));
-#if defined(DEBUG)
-		PVRSRVDebugRequest(DEBUG_REQUEST_VERBOSITY_MAX, IMG_NULL);
-#endif
 		goto _RGXSendCommandRaw_Exit;
 	}
 	
@@ -3139,9 +3218,11 @@ PVRSRV_ERROR RGXWaitForFWOp(PVRSRV_RGXDEV_INFO	*psDevInfo,
 		if (eError == PVRSRV_ERROR_TIMEOUT)
 		{
 			PVR_DPF((PVR_DBG_ERROR,"RGXScheduleCommandAndWait: PVRSRVWaitForValueKM timed out. Dump debug information."));
+			PVRSRVPowerUnlock();
 
 			PVRSRVDebugRequest(DEBUG_REQUEST_VERBOSITY_MAX,IMG_NULL);
 			PVR_ASSERT(eError != PVRSRV_ERROR_TIMEOUT);
+			goto _PVRSRVDebugRequest_Exit;
 		}
 	}
 
@@ -3150,6 +3231,7 @@ _PVRSRVSetDevicePowerStateKM_Exit:
 
 	PVRSRVPowerUnlock();
 
+_PVRSRVDebugRequest_Exit:
 _PVRSRVPowerLock_Exit:
 	return eError;
 }
@@ -3569,7 +3651,8 @@ PVRSRV_ERROR RGXUpdateHealthStatus(PVRSRV_DEVICE_NODE* psDevNode,
 	PVRSRV_RGXDEV_INFO*  psDevInfo;
 	RGXFWIF_TRACEBUF*  psRGXFWIfTraceBufCtl;
 	IMG_UINT32  ui32DMCount, ui32ThreadCount;
-	IMG_BOOL  bAnyDMProgress, bAllDMsIdle;
+	IMG_BOOL  bKCCBCmdsWaiting;
+	PVRSRV_DEV_POWER_STATE eNowPowerState, eLastPowerState;
 	
 	PVR_ASSERT(psDevNode != NULL);
 	psDevInfo = psDevNode->pvDevice;
@@ -3588,7 +3671,14 @@ PVRSRV_ERROR RGXUpdateHealthStatus(PVRSRV_DEVICE_NODE* psDevNode,
 	   That's not a problem as this function does not touch the HW except for the RGXScheduleCommand function,
 	   which is already powerlock safe. The worst thing that could happen is that Rogue might power back up
 	   but the chances of that are very low */
-	if (!PVRSRVIsDevicePowered(psDevNode->sDevId.ui32DeviceIndex))
+	if (PVRSRVGetDevicePowerState(psDevNode->sDevId.ui32DeviceIndex, &eNowPowerState) != PVRSRV_OK)
+	{
+		return PVRSRV_OK;
+	}
+	eLastPowerState = psDevInfo->eLastPowerState;
+	psDevInfo->eLastPowerState = eNowPowerState;
+
+	if (eNowPowerState != PVRSRV_DEV_POWER_STATE_ON)
 	{
 		return PVRSRV_OK;
 	}
@@ -3645,25 +3735,24 @@ PVRSRV_ERROR RGXUpdateHealthStatus(PVRSRV_DEVICE_NODE* psDevNode,
 	/*
 	   Event Object Timeouts check...
 	*/
-	if (psDevInfo->ui32LastGEOTimeouts > 1  &&  psPVRSRVData->ui32GEOConsecutiveTimeouts > psDevInfo->ui32LastGEOTimeouts)
+	if (psDevInfo->ui32GEOTimeoutsLastTime > 1  &&  psPVRSRVData->ui32GEOConsecutiveTimeouts > psDevInfo->ui32GEOTimeoutsLastTime)
 	{
 		PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: Global Event Object Timeouts have risen (from %d to %d)",
-				psDevInfo->ui32LastGEOTimeouts, psPVRSRVData->ui32GEOConsecutiveTimeouts));
+				psDevInfo->ui32GEOTimeoutsLastTime, psPVRSRVData->ui32GEOConsecutiveTimeouts));
 		eNewStatus = PVRSRV_DEVICE_HEALTH_STATUS_NOT_RESPONDING;
 	}
-	psDevInfo->ui32LastGEOTimeouts = psPVRSRVData->ui32GEOConsecutiveTimeouts;
+	psDevInfo->ui32GEOTimeoutsLastTime = psPVRSRVData->ui32GEOConsecutiveTimeouts;
 	
 	/*
-	   Check Kernel CCB for each DM. We need to see progress on at least one DM...
+	   Check the Kernel CCB pointers are valid. If any commands were waiting last time, then check
+	   that some have executed since then.
 	*/
-	bAnyDMProgress = IMG_FALSE;
-	bAllDMsIdle    = IMG_TRUE;
+	bKCCBCmdsWaiting = IMG_FALSE;
 	
 	for (ui32DMCount = 0; ui32DMCount < RGXFWIF_DM_MAX; ui32DMCount++)
 	{
 		RGXFWIF_CCB_CTL *psKCCBCtl = ((PVRSRV_RGXDEV_INFO*)psDevNode->pvDevice)->apsKernelCCBCtl[ui32DMCount];
 
-		/* Check the values of the CCB pointers are valid... */
 		if (psKCCBCtl != IMG_NULL)
 		{
 			if (psKCCBCtl->ui32ReadOffset > psKCCBCtl->ui32WrapMask  ||
@@ -3674,56 +3763,98 @@ PVRSRV_ERROR RGXUpdateHealthStatus(PVRSRV_DEVICE_NODE* psDevNode,
 				eNewStatus = PVRSRV_DEVICE_HEALTH_STATUS_NOT_RESPONDING;
 			}
 
-			/* Check that the Read Offset has updated since last time (or is empty)... */
-			if (bCheckAfterTimePassed)
+			if (psKCCBCtl->ui32ReadOffset != psKCCBCtl->ui32WriteOffset)
 			{
-				if (psKCCBCtl->ui32ReadOffset != psKCCBCtl->ui32WriteOffset)
-				{
-					bAllDMsIdle = IMG_FALSE;
-				}
-
-				if (psKCCBCtl->ui32ReadOffset != psDevInfo->ui32KCCBLastROff[ui32DMCount])
-				{
-					bAnyDMProgress = IMG_TRUE;
-				}
-				else if (psKCCBCtl->ui32ReadOffset != psKCCBCtl->ui32WriteOffset)
-				{
-					PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: KCCB for DM%d has not progressed (ROFF=%d WOFF=%d)",
-							ui32DMCount, psKCCBCtl->ui32ReadOffset, psKCCBCtl->ui32WriteOffset));
-				}
-				psDevInfo->ui32KCCBLastROff[ui32DMCount] = psKCCBCtl->ui32ReadOffset;
+				bKCCBCmdsWaiting = IMG_TRUE;
 			}
 		}
 	}
 
-	if (bCheckAfterTimePassed  &&  !bAllDMsIdle  &&  !bAnyDMProgress)
+	if (bCheckAfterTimePassed)
 	{
-		PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: No progress on KCCBs for any DM"));
-		eNewStatus = PVRSRV_DEVICE_HEALTH_STATUS_NOT_RESPONDING;
-	}
-	
-	/*
-	   If no commands are currently pending and nothing happened since the last poll, then
-	   schedule a dummy command to ping the firmware so we know it is alive and processing.
-	*/
-	if (bCheckAfterTimePassed  &&  bAllDMsIdle  &&  !bAnyDMProgress)
-	{
-		PVRSRV_ERROR      eError;
-		RGXFWIF_KCCB_CMD  sCmpKCCBCmd;
-
-		sCmpKCCBCmd.eCmdType = RGXFWIF_KCCB_CMD_HEALTH_CHECK;
-
-		eError = RGXScheduleCommand(psDevNode->pvDevice,
-									RGXFWIF_DM_GP,
-									&sCmpKCCBCmd,
-									sizeof(sCmpKCCBCmd),
-									IMG_TRUE);
-		if (eError != PVRSRV_OK)
+		IMG_UINT32  ui32KCCBCmdsExecuted = psDevInfo->psRGXFWIfTraceBuf->ui32KCCBCmdsExecuted;
+		
+		if (psDevInfo->ui32KCCBCmdsExecutedLastTime == ui32KCCBCmdsExecuted)
 		{
-			PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: Cannot schedule Health Check command! (0x%x)", eError));
+			/*
+			   If something was waiting last time then the Firmware has stopped processing commands.
+			*/
+			if (psDevInfo->bKCCBCmdsWaitingLastTime)
+			{
+				PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: No KCCB commands executed since check!"));
+				eNewStatus = PVRSRV_DEVICE_HEALTH_STATUS_NOT_RESPONDING;
+			}
+		
+			/*
+			   If no commands are currently pending and nothing happened since the last poll, then
+			   schedule a dummy command to ping the firmware so we know it is alive and processing.
+			*/
+			if (!bKCCBCmdsWaiting)
+			{
+				RGXFWIF_KCCB_CMD  sCmpKCCBCmd;
+				PVRSRV_ERROR      eError;
+
+				sCmpKCCBCmd.eCmdType = RGXFWIF_KCCB_CMD_HEALTH_CHECK;
+
+				eError = RGXScheduleCommand(psDevNode->pvDevice,
+											RGXFWIF_DM_GP,
+											&sCmpKCCBCmd,
+											sizeof(sCmpKCCBCmd),
+											IMG_TRUE);
+				if (eError != PVRSRV_OK)
+				{
+					PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: Cannot schedule Health Check command! (0x%x)", eError));
+				}
+				else
+				{
+					bKCCBCmdsWaiting = IMG_TRUE;
+				}
+			}
 		}
+
+		psDevInfo->bKCCBCmdsWaitingLastTime     = bKCCBCmdsWaiting;
+		psDevInfo->ui32KCCBCmdsExecutedLastTime = ui32KCCBCmdsExecuted;
 	}
-	
+
+	if (bCheckAfterTimePassed && (PVRSRV_DEVICE_HEALTH_STATUS_OK==eNewStatus) &&
+		(eLastPowerState == eNowPowerState))
+	{
+		/* Attempt to detect and deal with any stalled client contexts */
+		IMG_BOOL bStalledClient = IMG_FALSE;
+		if (CheckForStalledClientTransferCtxt(psDevInfo))
+		{
+			PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: Detected stalled client transfer context"));
+			bStalledClient = IMG_TRUE;
+		}
+		if (CheckForStalledClientRenderCtxt(psDevInfo))
+		{
+			PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: Detected stalled client render context"));
+			bStalledClient = IMG_TRUE;
+		}
+#if !defined(UNDER_WDDM)
+		if (CheckForStalledClientComputeCtxt(psDevInfo))
+		{
+			PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: Detected stalled client compute context"));
+			bStalledClient = IMG_TRUE;
+		}
+#endif
+#if defined(RGX_FEATURE_RAY_TRACING)
+		if (CheckForStalledClientRayCtxt(psDevInfo))
+		{
+			PVR_DPF((PVR_DBG_WARNING, "RGXGetDeviceHealthStatus: Detected stalled client raytrace context"));
+			bStalledClient = IMG_TRUE;
+		}
+#endif
+		/* try the unblock routines only on the transition from OK to stalled */
+		if (!psDevInfo->bStalledClient && bStalledClient)
+		{
+#if defined(SUPPORT_DISPLAY_CLASS)
+			DCDisplayContextFlush();
+#endif
+		}
+		psDevInfo->bStalledClient = bStalledClient;
+	}
+
 	/*
 	   Finished, save the new status...
 	*/
@@ -3732,6 +3863,13 @@ _RGXUpdateHealthStatus_Exit:
 
 	return PVRSRV_OK;
 } /* RGXUpdateHealthStatus */
+
+PVRSRV_ERROR CheckStalledClientCommonContext(RGX_SERVER_COMMON_CONTEXT *psCurrentServerCommonContext)
+{
+	RGX_CLIENT_CCB 	*psCurrentClientCCB = psCurrentServerCommonContext->psClientCCB;
+
+	return CheckForStalledCCB(psCurrentClientCCB);
+}
 
 IMG_VOID DumpStalledFWCommonContext(RGX_SERVER_COMMON_CONTEXT *psCurrentServerCommonContext,
 									DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf)

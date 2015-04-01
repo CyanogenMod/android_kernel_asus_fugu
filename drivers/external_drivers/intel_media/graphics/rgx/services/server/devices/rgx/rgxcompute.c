@@ -100,7 +100,8 @@ PVRSRV_ERROR PVRSRVRGXCreateComputeContextKM(CONNECTION_DATA			*psConnection,
 
 	/* Allocate cleanup sync */
 	eError = SyncPrimAlloc(psDeviceNode->hSyncPrimContext,
-						   &psComputeContext->psSync);
+						   &psComputeContext->psSync,
+						   "compute cleanup");
 	if (eError != PVRSRV_OK)
 	{
 		PVR_DPF((PVR_DBG_ERROR,"PVRSRVRGXCreateComputeContextKM: Failed to allocate cleanup sync (0x%x)",
@@ -214,6 +215,7 @@ PVRSRV_ERROR PVRSRVRGXDestroyComputeContextKM(RGX_SERVER_COMPUTE_CONTEXT *psComp
 		PVR_LOG(("%s: Unexpected error from RGXFWRequestCommonContextCleanUp (%s)",
 				__FUNCTION__,
 				PVRSRVGetErrorStringKM(eError)));
+		return eError;
 	}
 
 	/* ... it has so we can free its resources */
@@ -464,6 +466,29 @@ IMG_VOID CheckForStalledComputeCtxt(PVRSRV_RGXDEV_INFO *psDevInfo,
 	dllist_foreach_node(&(psDevInfo->sComputeCtxtListHead),
 						CheckForStalledComputeCtxtCommand, pfnDumpDebugPrintf);
 	OSWRLockReleaseRead(psDevInfo->hComputeCtxListLock);
+}
+
+static IMG_BOOL CheckForStalledClientComputeCtxtCommand(PDLLIST_NODE psNode, IMG_PVOID pvCallbackData)
+{
+	PVRSRV_ERROR *peError = (PVRSRV_ERROR*)pvCallbackData;
+	RGX_SERVER_COMPUTE_CONTEXT *psCurrentServerComputeCtx = IMG_CONTAINER_OF(psNode, RGX_SERVER_COMPUTE_CONTEXT, sListNode);
+	RGX_SERVER_COMMON_CONTEXT *psCurrentServerComputeCommonCtx = psCurrentServerComputeCtx->psServerCommonContext;
+
+	if (PVRSRV_ERROR_CCCB_STALLED == CheckStalledClientCommonContext(psCurrentServerComputeCommonCtx))
+	{
+		*peError = PVRSRV_ERROR_CCCB_STALLED;
+	}
+
+	return IMG_TRUE;
+}
+IMG_BOOL CheckForStalledClientComputeCtxt(PVRSRV_RGXDEV_INFO *psDevInfo)
+{
+	PVRSRV_ERROR eError = PVRSRV_OK;
+	OSWRLockAcquireRead(psDevInfo->hComputeCtxListLock, DEVINFO_COMPUTELIST);
+	dllist_foreach_node(&(psDevInfo->sComputeCtxtListHead), 
+						CheckForStalledClientComputeCtxtCommand, &eError);
+	OSWRLockReleaseRead(psDevInfo->hComputeCtxListLock);
+	return (PVRSRV_ERROR_CCCB_STALLED == eError)? IMG_TRUE: IMG_FALSE;
 }
 
 IMG_EXPORT PVRSRV_ERROR 

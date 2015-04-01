@@ -107,6 +107,8 @@ static PVRSRV_DEVICE_CONFIG gsDevices[] =
 		APOLLO_INTERRUPT_ROGUE,
 		/* bIRQIsShared */
 		IMG_TRUE,
+		/* eIRQActiveLevel */
+		PVRSRV_DEVICE_IRQ_ACTIVE_SYSDEFAULT,
 
 		/* hDevData */
 		&gsRGXData,
@@ -608,7 +610,6 @@ static void ApolloInterruptHandler(void* pvData)
 }
 
 PVRSRV_ERROR SysInstallDeviceLISR(IMG_UINT32 ui32IRQ,
-				  IMG_BOOL bShared,
 				  IMG_CHAR *pszName,
 				  PFN_LISR pfnLISR,
 				  IMG_PVOID pvData,

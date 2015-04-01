@@ -99,6 +99,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ENV_DATA *gpsEnvData = IMG_NULL;
 
+struct task_struct *OSGetBridgeLockOwner(void);
+
 /*
 	Create a 4MB pool which should be more then enough in most cases,
 	if it becomes full then the calling code will fall back to
@@ -756,7 +758,6 @@ PVRSRV_ERROR OSInstallDeviceLISR(PVRSRV_DEVICE_CONFIG *psDevConfig,
 {
 #if defined(SUPPORT_SYSTEM_INTERRUPT_HANDLING)
 	return SysInstallDeviceLISR(psDevConfig->ui32IRQ,
-					psDevConfig->bIRQIsShared,
 					psDevConfig->pszName,
 					pfnLISR,
 					pvData,
@@ -767,14 +768,23 @@ PVRSRV_ERROR OSInstallDeviceLISR(PVRSRV_DEVICE_CONFIG *psDevConfig,
 
 	psLISRData = kmalloc(sizeof(LISR_DATA), GFP_KERNEL);
 
-	if (psDevConfig->bIRQIsShared)
-	{
-		flags = IRQF_SHARED;
-	}
-
 	psLISRData->pfnLISR = pfnLISR;
 	psLISRData->pvData = pvData;
 	psLISRData->ui32IRQ = psDevConfig->ui32IRQ;
+
+	if (psDevConfig->bIRQIsShared)
+	{
+		flags |= IRQF_SHARED;
+	}
+
+	if (psDevConfig->eIRQActiveLevel == PVRSRV_DEVICE_IRQ_ACTIVE_HIGH)
+	{
+		flags |= IRQF_TRIGGER_HIGH;
+	}
+	else if (psDevConfig->eIRQActiveLevel == PVRSRV_DEVICE_IRQ_ACTIVE_LOW)
+	{
+		flags |= IRQF_TRIGGER_LOW;
+	}
 
 	PVR_TRACE(("Installing device LISR %s on IRQ %d with cookie %p", psDevConfig->pszName, psDevConfig->ui32IRQ, pvData));
 
@@ -1952,19 +1962,28 @@ void OSDumpStack(void)
 	dump_stack();
 }
 
+static struct task_struct *gsOwner;
+
 void OSAcquireBridgeLock(void)
 {
 	mutex_lock(&gPVRSRVLock);
+	gsOwner = current;
 }
 
 void OSReleaseBridgeLock(void)
 {
+	gsOwner = NULL;
 	mutex_unlock(&gPVRSRVLock);
 }
 
-IMG_BOOL OSIsBridgeLockedByMe()
+struct task_struct *OSGetBridgeLockOwner(void)
 {
-	return (mutex_is_locked(&gPVRSRVLock) && current == gPVRSRVLock.owner);
+	return gsOwner;
+}
+
+IMG_BOOL OSIsBridgeLockedByMe(void)
+{
+	return (mutex_is_locked(&gPVRSRVLock) && current == gsOwner);
 }
 
 /*************************************************************************/ /*!

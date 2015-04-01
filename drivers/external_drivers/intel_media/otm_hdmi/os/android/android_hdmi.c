@@ -246,28 +246,47 @@ static irqreturn_t __hdmi_irq_handler_bottomhalf(void *data)
 		struct drm_connector *connector = NULL;
 		struct i2c_adapter *adapter = NULL;
 		bool hdmi_status = 0;
+		bool current_status = 0;
+		int hdmi_detect_count = 3;
+		int hdmi_detect_sleep_time= 0;
+		int hdmi_detect_exit_count = 50;
 		char *uevent_string = NULL;
 
 		otm_hdmi_power_rails_on();
+
 		/* Check HDMI status, read EDID only if connected */
 		hdmi_status = otm_hdmi_get_cable_status(hdmi_priv->context);
 
-		/* if the cable status has not changed return */
-		if (hdmi_status == processed_hdmi_status) {
+		/* shorten sleep time for hdcp comppliance test 1a-02 */
+		hdmi_detect_sleep_time = (hdmi_status == false) ? 10 : 60;
+
+		do {
+			/* Debounce for at least 60ms in order for the
+			* cable status to have stabilized for next detection.
+			* Check its status to make sure same for 3 times.
+			*/
+			msleep(hdmi_detect_sleep_time);
+			current_status =
+				otm_hdmi_get_cable_status(hdmi_priv->context);
+			if (hdmi_status != current_status) {
+				hdmi_status = current_status;
+				hdmi_detect_count = 3;
+				hdmi_detect_sleep_time =
+					(hdmi_status == false) ? 10 : 60;
+			}
+		} while (hdmi_detect_count-- && hdmi_detect_exit_count--);
+
+		/* if the cable status has not changed/stable return */
+		if (hdmi_status == processed_hdmi_status ||
+			hdmi_detect_exit_count == 0) {
+			if (hdmi_detect_exit_count == 0)
+				pr_err("HDMI Cable status not stable!");
 			if (!hdmi_status)
 				otm_hdmi_power_rails_off();
 			ospm_power_using_hw_end(OSPM_DISPLAY_ISLAND);
 			return IRQ_HANDLED;
 		}
 
-		if (hdmi_status) {
-			/* Debounce for atleast 60ms in order for the
-			* cable status to have stabilized
-			*/
-			msleep(60);
-			hdmi_status =
-				otm_hdmi_get_cable_status(hdmi_priv->context);
-		}
 		processed_hdmi_status = hdmi_status;
 
 #ifdef OTM_HDMI_HDCP_ENABLE
@@ -667,7 +686,7 @@ int android_hdmi_mode_valid(struct drm_connector *connector,
 		goto err;
 	}
 
-	if (mode->vrefresh > 60) {
+	if ((mode->vrefresh < 50) || (mode->vrefresh > 60)) {
 		ret = MODE_BAD_VVALUE;
 		goto err;
 	}
@@ -1014,9 +1033,23 @@ static int calculate_refresh_rate(struct drm_display_mode *mode)
  */
 static bool query_fw_hdmi_setting(struct drm_device *dev,
 				  uint32_t *hdisplay,
-				  uint32_t *vdisplay)
+				  uint32_t *vdisplay,
+				  uint8_t *vic,
+				  int * monitor_type)
 {
 	uint32_t htotal, vtotal;
+	struct drm_psb_private *dev_priv;
+	struct android_hdmi_priv *hdmi_priv;
+
+	if (NULL == dev)
+		return false;
+	dev_priv = dev->dev_private;
+	if (NULL == dev_priv)
+		return false;
+	hdmi_priv = dev_priv->hdmi_priv;
+	if (NULL == hdmi_priv)
+		return false;
+
 
 	if (!ospm_power_using_hw_begin(OSPM_DISPLAY_ISLAND,
 				OSPM_UHB_FORCE_POWER_ON))
@@ -1025,11 +1058,18 @@ static bool query_fw_hdmi_setting(struct drm_device *dev,
 	htotal = REG_READ(HTOTAL_B);
 	vtotal = REG_READ(VTOTAL_B);
 
+	*vic = otm_hdmi_get_vic(hdmi_priv->context);
+
+	if (REG_READ(VIDEO_DIP_CTL) & EN_DIP)
+		*monitor_type = MONITOR_TYPE_HDMI;
+	else
+		*monitor_type = MONITOR_TYPE_DVI;
+
 	if (htotal != 0 && vtotal != 0) {
 		*hdisplay = ((htotal + 1) << 16) >> 16;
 		*vdisplay = ((vtotal + 1) << 16) >> 16;
-	        pr_info("%s:fw set htotal=0x%x vtotal=0x%x!\n",
-				__func__, htotal, vtotal);
+	        pr_info("%s:fw set htotal=0x%x vtotal=0x%x! vic=%d monitor_type=%d\n",
+				__func__, htotal, vtotal, *vic, *monitor_type);
 	}
 
 	ospm_power_using_hw_end(OSPM_DISPLAY_ISLAND);
@@ -1683,11 +1723,6 @@ void android_hdmi_suspend_display(struct drm_device *dev)
 	if (NULL == hdmi_priv)
 		return;
 
-	if (hdmi_priv->hdmi_audio_enabled) {
-		pr_err("OSPM: %s: hdmi audio is busy\n", __func__);
-		return;
-	}
-
 	/* Check if monitor is attached to HDMI connector. */
 	is_connected = otm_hdmi_get_cable_status(hdmi_priv->context);
 
@@ -2010,12 +2045,16 @@ bool android_hdmi_mode_fixup(struct drm_encoder *encoder,
 {
 	struct drm_device *dev = encoder->dev;
 	struct drm_psb_private *dev_priv = dev->dev_private;
+	struct android_hdmi_priv *hdmi_priv = dev_priv->hdmi_priv;
+
 	otm_hdmi_timing_t otm_mode;
 	uint32_t hdisplay = 0;
 	uint32_t vdisplay = 0;
+	uint8_t vic = 0;
+	int monitor_type = MONITOR_TYPE_HDMI;
 
 	if (dev_priv->hdmi_first_boot) {
-		query_fw_hdmi_setting(dev, &hdisplay, &vdisplay);
+		query_fw_hdmi_setting(dev, &hdisplay, &vdisplay, &vic, &monitor_type);
 		__android_hdmi_drm_mode_to_otm_timing(&otm_mode, (struct drm_display_mode *)mode);
 
 		if (mode->hdisplay == 640 &&
@@ -2028,8 +2067,8 @@ bool android_hdmi_mode_fixup(struct drm_encoder *encoder,
 			dev_priv->hdmi_first_boot = false;
 		} else if (hdisplay == mode->hdisplay &&
 					vdisplay == mode->vdisplay &&
-					(otm_mode.metadata == 4 || otm_mode.metadata == 16)) {
-			/* FW only supports 640x480p@60Hz, 720p@60Hz and 1080p@60Hz */
+					(otm_mode.metadata == vic) &&
+					(monitor_type == hdmi_priv->monitor_type)) {
 			pr_info("%s: skip first boot !\n", __func__);
 			dev_priv->hdmi_first_boot = true;
 		} else {

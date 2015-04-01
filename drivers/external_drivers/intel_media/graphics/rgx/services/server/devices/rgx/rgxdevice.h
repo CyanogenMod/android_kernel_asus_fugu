@@ -53,6 +53,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "cache_external.h"
 #include "device.h"
 #include "osfunc.h"
+#include "servicesext.h"
 
 typedef struct _RGX_SERVER_COMMON_CONTEXT_ RGX_SERVER_COMMON_CONTEXT;
 
@@ -205,6 +206,9 @@ typedef struct _PVRSRV_RGXDEV_INFO_
 
 	DEVMEM_MEMDESC			*psRGXFWIfInitMemDesc;
 
+	DEVMEM_MEMDESC			*psRGXFWIfRuntimeCfgMemDesc;
+	RGXFWIF_RUNTIME_CFG		*psRGXFWIfRuntimeCfg;
+
 #if defined(RGXFW_ALIGNCHECKS)
 	DEVMEM_MEMDESC			*psRGXFWAlignChecksMemDesc;	
 #endif
@@ -281,9 +285,12 @@ typedef struct _PVRSRV_RGXDEV_INFO_
 
 	/* Poll data for detecting firmware fatal errors */
 	IMG_UINT32  aui32CrLastPollAddr[RGXFW_THREAD_NUM];
-	IMG_UINT32  ui32KCCBLastROff[RGXFWIF_DM_MAX];
-	IMG_UINT32  ui32LastGEOTimeouts;
+	IMG_UINT32  ui32KCCBCmdsExecutedLastTime;
+	IMG_BOOL    bKCCBCmdsWaitingLastTime;
+	IMG_UINT32  ui32GEOTimeoutsLastTime;
 
+	/* Client stall detection */
+	IMG_BOOL	bStalledClient;
 
 	/* Timer Queries */
 	IMG_UINT32     ui32ActiveQueryId;       /*!< id of the active line */
@@ -325,6 +332,8 @@ typedef struct _PVRSRV_RGXDEV_INFO_
 
 	DLLIST_NODE 		sCommonCtxtListHead;
 	IMG_UINT32			ui32CommonCtxtCurrentID;			/*!< ID assigned to the next common context */
+
+	PVRSRV_DEV_POWER_STATE eLastPowerState;
 } PVRSRV_RGXDEV_INFO;
 
 

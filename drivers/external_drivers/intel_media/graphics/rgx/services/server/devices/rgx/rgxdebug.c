@@ -1305,6 +1305,16 @@ static IMG_VOID _RGXDumpFWHWRInfo(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf,
 										IMG_FALSE);
 					}
 					break;
+#if defined(RGX_FEATURE_CLUSTER_GROUPING)
+					case RGX_HWRTYPE_TEXASBIF0FAULT:
+					{
+						_RGXDumpRGXBIFBank(pfnDumpDebugPrintf, psDevInfo, RGXDBG_TEXAS_BIF,
+										psHWRInfo->uHWRData.sBIFInfo.ui64BIFMMUStatus,
+										psHWRInfo->uHWRData.sBIFInfo.ui64BIFReqStatus,
+										IMG_FALSE);
+					}
+					break;
+#endif
 #else
 					case RGX_HWRTYPE_MMUFAULT:
 					{
@@ -1434,6 +1444,12 @@ static IMG_VOID _RGXDumpRGXDebugSummary(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrint
 			break;
 		}
 		
+		case PVRSRV_DEVICE_HEALTH_STATUS_NOT_RESPONDING:
+		{
+			pszState = "NOT RESPONDING";
+			break;
+		}
+		
 		case PVRSRV_DEVICE_HEALTH_STATUS_DEAD:
 		{
 			pszState = "DEAD";
@@ -1543,19 +1559,11 @@ IMG_VOID RGXDumpDebugInfo(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf,
                           PVRSRV_RGXDEV_INFO	*psDevInfo)
 {
 	IMG_UINT32 i;
-	PVRSRV_ERROR eError;
-	eError = PVRSRVPowerLock();
-	if (eError != PVRSRV_OK)
-	{
-	        PVR_DPF((PVR_DBG_ERROR,"RGXDumpDebugInfo: Failed to acquire power lock"));
-	        return;
-	}
 
 	for(i=0;i<=DEBUG_REQUEST_VERBOSITY_MAX;i++)
 	{
 		RGXDebugRequestProcess(pfnDumpDebugPrintf, psDevInfo, i);
 	}
-	PVRSRVPowerUnlock();
 }
 
 
@@ -1797,12 +1805,17 @@ IMG_VOID RGXDebugRequestProcess(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf,
                                 PVRSRV_RGXDEV_INFO	*psDevInfo,
                                 IMG_UINT32			ui32VerbLevel)
 {
+	PVRSRV_ERROR eError = PVRSRVPowerLock();
+	if (eError != PVRSRV_OK)
+	{
+		PVR_DPF((PVR_DBG_ERROR,	"RGXDebugRequestProcess : failed to acquire lock, error:0x%x", eError));
+		return;
+	}
 
 	switch (ui32VerbLevel)
 	{
 		case DEBUG_REQUEST_VERBOSITY_LOW :
 		{
-			PVRSRV_ERROR            eError;
 			IMG_UINT32              ui32DeviceIndex;
 			PVRSRV_DEV_POWER_STATE  ePowerState;
 			IMG_BOOL                bRGXPoweredON;
@@ -1813,7 +1826,7 @@ IMG_VOID RGXDebugRequestProcess(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf,
 			if (eError != PVRSRV_OK)
 			{
 				PVR_DPF((PVR_DBG_ERROR, "RGXDebugRequestProcess: Error retrieving RGX power state. No debug info dumped."));
-				return;
+				goto Exit;
 			}
 
 			bRGXPoweredON = (ePowerState == PVRSRV_DEV_POWER_STATE_ON);
@@ -1876,6 +1889,12 @@ IMG_VOID RGXDebugRequestProcess(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf,
 				}
 		 	}
 
+		 	/* Dump the KCCB commands executed */
+			{
+				PVR_DUMPDEBUG_LOG(("RGX Kernel CCB commands executed = %d",
+				                  psDevInfo->psRGXFWIfTraceBuf->ui32KCCBCmdsExecuted));
+			}
+
 		 	/* Dump the IRQ info */
 			{
 				PVR_DUMPDEBUG_LOG(("RGX FW IRQ count = %d, last sampled in MISR = %d",
@@ -1894,7 +1913,7 @@ IMG_VOID RGXDebugRequestProcess(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf,
 				{
 					PVR_DPF((PVR_DBG_ERROR,"RGXDebugRequestProcess: Failed to acquire kernel fw if ctl (%u)",
 								eError));
-					return;
+					goto Exit;
 				}
 
 				PVR_DUMPDEBUG_LOG(("RGX FW config flags = 0x%X", psRGXFWInit->ui32ConfigFlags));
@@ -1929,7 +1948,7 @@ IMG_VOID RGXDebugRequestProcess(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf,
 					if (pszLine == IMG_NULL)
 					{
 						PVR_DPF((PVR_DBG_ERROR,"RGXDebugRequestProcess: Out of mem allocating line string (size: %d)", 9*RGXFW_TRACE_BUFFER_LINESIZE));
-						return;
+						goto Exit;
 					}
 		
 					/* Print the tracepointer */
@@ -2052,6 +2071,9 @@ IMG_VOID RGXDebugRequestProcess(DUMPDEBUG_PRINTF_FUNC *pfnDumpDebugPrintf,
 		default:
 			break;
 	}
+
+Exit:
+	PVRSRVPowerUnlock();
 }
 
 /*

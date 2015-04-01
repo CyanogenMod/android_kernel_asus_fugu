@@ -1,5 +1,6 @@
 /*************************************************************************/ /*!
-@Title          RGX Core BVNC 4.23.2.51
+@File           pvr_sync.h
+@Title          Kernel driver for Android's sync mechanism
 @Copyright      Copyright (c) Imagination Technologies Ltd. All Rights Reserved
 @License        Dual MIT/GPLv2
 
@@ -38,34 +39,41 @@ COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */ /**************************************************************************/
+/* vi: set ts=8: */
 
-#ifndef _RGXCORE_KM_4_23_2_51_H_
-#define _RGXCORE_KM_4_23_2_51_H_
+#ifndef _PVR_SYNC_H
+#define _PVR_SYNC_H
 
-/***** Automatically generated file (7/28/2014 4:32:54 PM): Do not edit manually ********************/
-/***** Timestamp:  (7/28/2014 4:32:54 PM)************************************************************/
-/***** CS: @2791924 ******************************************************************/
+#include "pvr_fd_sync_user.h"
+#include "rgx_fwif_shared.h"
 
+/* Services internal interface */
+enum PVRSRV_ERROR pvr_sync_init(void);
+void pvr_sync_deinit(void);
 
-/******************************************************************************
- * BVNC = 4.23.2.51 
- *****************************************************************************/
-#define RGX_BVNC_KM_B 4
-#define RGX_BVNC_KM_V 23
-#define RGX_BVNC_KM_N 2
-#define RGX_BVNC_KM_C 51
+/* to keep track of the intermediate allocations done for the FD merge */
+struct pvr_sync_fd_merge_data
+{
+	PRGXFWIF_UFO_ADDR *pauiFenceUFOAddress;
+	__u32             *paui32FenceValue;
+	PRGXFWIF_UFO_ADDR *pauiUpdateUFOAddress;
+	__u32             *paui32UpdateValue;
+};
 
-/******************************************************************************
- * Errata 
- *****************************************************************************/
+enum PVRSRV_ERROR 
+pvr_sync_merge_fences(__u32                         *pui32ClientFenceCountOut,
+		      PRGXFWIF_UFO_ADDR             **ppauiFenceUFOAddressOut,
+		      __u32                         **ppaui32FenceValueOut,
+		      __u32                         *pui32ClientUpdateCountOut,
+		      PRGXFWIF_UFO_ADDR             **ppauiUpdateUFOAddressOut,
+		      __u32                         **ppaui32UpdateValueOut,
+		      const char                    *pszName,
+		      bool                          bUpdate,
+		      const __u32                   ui32NumFDs,
+		      const __s32                   *paui32FDs,
+		      struct pvr_sync_fd_merge_data *psFDMergeData);
 
+IMG_VOID pvr_sync_merge_fences_cleanup(struct pvr_sync_fd_merge_data *psFDMergeData);
+enum PVRSRV_ERROR pvr_sync_nohw_update_fence(__s32 i32FDFence);
 
-
- 
-/******************************************************************************
- * Enhancements 
- *****************************************************************************/
-
-
-
-#endif /* _RGXCORE_KM_4_23_2_51_H_ */
+#endif /* _PVR_SYNC_H */
