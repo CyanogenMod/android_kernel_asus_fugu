@@ -30,6 +30,7 @@
 #include <linux/blockgroup_lock.h>
 #include <linux/percpu_counter.h>
 #include <crypto/hash.h>
+#include <linux/fs-xcomp.h>
 #ifdef __KERNEL__
 #include <linux/compat.h>
 #endif
@@ -921,6 +922,10 @@ struct ext4_inode_info {
 
 	/* Precomputed uuid+inum+igen checksum for seeding inode checksums */
 	__u32 i_csum_seed;
+
+#ifdef CONFIG_FS_TRANSPARENT_COMPRESSION
+	struct xcomp_inode_info i_xcomp_info;
+#endif
 };
 
 /*
