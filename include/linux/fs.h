@@ -560,6 +560,9 @@ struct inode {
 	unsigned short          i_bytes;
 	unsigned int		i_blkbits;
 	blkcnt_t		i_blocks;
+#ifdef CONFIG_FS_TRANSPARENT_COMPRESSION
+	loff_t			i_compressed_size;
+#endif
 
 #ifdef __NEED_I_SIZE_ORDERED
 	seqcount_t		i_size_seqcount;
@@ -634,6 +637,12 @@ enum inode_i_mutex_lock_class
 	I_MUTEX_QUOTA
 };
 
+#if defined(CONFIG_FS_TRANSPARENT_COMPRESSION) && defined(FS_IMPL)
+#define I_SIZE_MEMBER i_compressed_size
+#else
+#define I_SIZE_MEMBER i_size
+#endif
+
 /*
  * NOTE: in a 32bit arch with a preemptable kernel and
  * an UP compile the i_size_read/write must be atomic
@@ -652,18 +661,18 @@ static inline loff_t i_size_read(const struct inode *inode)
 
 	do {
 		seq = read_seqcount_begin(&inode->i_size_seqcount);
-		i_size = inode->i_size;
+		i_size = inode->I_SIZE_MEMBER;
 	} while (read_seqcount_retry(&inode->i_size_seqcount, seq));
 	return i_size;
 #elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPT)
 	loff_t i_size;
 
 	preempt_disable();
-	i_size = inode->i_size;
+	i_size = inode->I_SIZE_MEMBER;
 	preempt_enable();
 	return i_size;
 #else
-	return inode->i_size;
+	return inode->I_SIZE_MEMBER;
 #endif
 }
 
