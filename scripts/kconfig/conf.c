@@ -74,9 +74,9 @@ static void strip(char *str)
 static void check_stdin(void)
 {
 	if (!valid_stdin) {
-		printf(_("aborted!\n\n"));
-		printf(_("Console input/output is redirected. "));
-		printf(_("Run 'make oldconfig' to update configuration.\n\n"));
+		printf("aborted!\n\n");
+		printf("Console input/output is redirected. ");
+		printf("Run 'make oldconfig' to update configuration.\n\n");
 		exit(1);
 	}
 }
@@ -86,7 +86,7 @@ static int conf_askvalue(struct symbol *sym, const char *def)
 	enum symbol_type type = sym_get_type(sym);
 
 	if (!sym_has_value(sym))
-		printf(_("(NEW) "));
+		printf("(NEW) ");
 
 	line[0] = '\n';
 	line[1] = 0;
@@ -287,10 +287,10 @@ static int conf_choice(struct menu *menu)
 			if (child->sym->name)
 				printf(" (%s)", child->sym->name);
 			if (!sym_has_value(child->sym))
-				printf(_(" (NEW)"));
+				printf(" (NEW)");
 			printf("\n");
 		}
-		printf(_("%*schoice"), indent - 1, "");
+		printf("%*schoice", indent - 1, "");
 		if (cnt == 1) {
 			printf("[1]: 1\n");
 			goto conf_childs;
@@ -435,7 +435,7 @@ static void check_conf(struct menu *menu)
 				}
 			} else if (input_mode != olddefconfig) {
 				if (!conf_cnt++)
-					printf(_("*\n* Restart config...\n*\n"));
+					printf("*\n* Restart config...\n*\n");
 				rootEntry = menu_get_parent_menu(menu);
 				conf(rootEntry);
 			}
@@ -551,7 +551,7 @@ int main(int ac, char **av)
 		}
 	}
 	if (ac == optind) {
-		printf(_("%s: Kconfig file missing\n"), av[0]);
+		printf("%s: Kconfig file missing\n", av[0]);
 		conf_usage(progname);
 		exit(1);
 	}
@@ -576,9 +576,9 @@ int main(int ac, char **av)
 		if (!defconfig_file)
 			defconfig_file = conf_get_default_confname();
 		if (conf_read(defconfig_file)) {
-			printf(_("***\n"
+			printf("***\n"
 				"*** Can't find default configuration \"%s\"!\n"
-				"***\n"), defconfig_file);
+				"***\n", defconfig_file);
 			exit(1);
 		}
 		break;
@@ -632,7 +632,7 @@ int main(int ac, char **av)
 			name = getenv("KCONFIG_NOSILENTUPDATE");
 			if (name && *name) {
 				fprintf(stderr,
-					_("\n*** The configuration requires explicit update.\n\n"));
+					"\n*** The configuration requires explicit update.\n\n");
 				return 1;
 			}
 		}
@@ -684,22 +684,22 @@ int main(int ac, char **av)
 		 * All other commands are only used to generate a config.
 		 */
 		if (conf_get_changed() && conf_write(NULL)) {
-			fprintf(stderr, _("\n*** Error during writing of the configuration.\n\n"));
+			fprintf(stderr, "\n*** Error during writing of the configuration.\n\n");
 			exit(1);
 		}
 		if (conf_write_autoconf()) {
-			fprintf(stderr, _("\n*** Error during update of the configuration.\n\n"));
+			fprintf(stderr, "\n*** Error during update of the configuration.\n\n");
 			return 1;
 		}
 	} else if (input_mode == savedefconfig) {
 		if (conf_write_defconfig(defconfig_file)) {
-			fprintf(stderr, _("n*** Error while saving defconfig to: %s\n\n"),
+			fprintf(stderr, "n*** Error while saving defconfig to: %s\n\n",
 			        defconfig_file);
 			return 1;
 		}
 	} else if (input_mode != listnewconfig) {
 		if (conf_write(NULL)) {
-			fprintf(stderr, _("\n*** Error during writing of the configuration.\n\n"));
+			fprintf(stderr, "\n*** Error during writing of the configuration.\n\n");
 			exit(1);
 		}
 	}
